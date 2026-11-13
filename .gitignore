@@ -1,0 +1,13 @@
+# build output
+build/
+*.pk3
+*.bsp
+*.prt
+*.vis
+*.lin
+__pycache__/
+
+# game-derived files: never commit (copyrighted assets / EA map sources)
+compilebase/
+*_orig.map
+maps/tallchurch/mp_tallchurch_dm.map

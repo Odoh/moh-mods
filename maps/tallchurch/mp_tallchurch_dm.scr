@@ -1,0 +1,164 @@
+// DESTROYED VILLAGE
+// ARCHITECTURE: NED
+// SCRIPTING: NED
+
+main:
+
+// set scoreboard messages
+setcvar "g_obj_alliedtext1" "Destroyed Village - Tall Tower"
+setcvar "g_obj_alliedtext2" ""
+setcvar "g_obj_alliedtext3" ""
+setcvar "g_obj_axistext1" ""
+setcvar "g_obj_axistext2" ""
+setcvar "g_obj_axistext3" ""
+
+setcvar "g_scoreboardpic" "mohdm2"
+
+	// call additional stuff for playing this map round based is needed
+	if(level.roundbased)
+		thread roundbasedthread
+
+	level waittill prespawn
+
+	//*** Precache Dm Stuff
+	exec global/DMprecache.scr
+
+	exec global/door_locked.scr::lock
+	level.script = maps/dm/mp_tallchurch_dm.scr
+	exec global/ambient.scr mohdm2
+	
+	level waittill spawn
+	$world farclipoverride -1
+
+	//add in our kill brush under the cheat point.
+	local.killbrush = spawn trigger_hurt
+	local.killbrush damage 10000
+	local.killbrush.origin = ( -2200 2200 -80 )
+	local.killbrush setsize ( -1000 -1000 -120 ) ( 1000 1000 0 )
+
+	// ---- tall tower extras ----
+	// g_towerplayer: name of the player who always spawns in the belfry and
+	// darkens the map while inside the tower. Empty = every human (non-bot) player.
+	event_subscribe "player_spawned" "tower_onspawn"
+	thread tower_darkness
+	thread tower_bulletrange
+
+end
+
+//-----------------------------------------------------------------------------
+// Is this player the "tower player"?
+is_tower_player local.p:
+	if (local.p == NULL)
+		end 0
+	if (isBot local.p)
+		end 0
+	local.want = getcvar "g_towerplayer"
+	if (local.want == "")
+		end 1
+	if (local.p.netname == local.want)
+		end 1
+end 0
+
+//-----------------------------------------------------------------------------
+// Runs every time any player spawns (self = that player)
+tower_onspawn:
+	if ((waitthread is_tower_player self) != 1)
+		end
+	wait 0.1
+	if (self == NULL || self.health <= 0)
+		end
+	// belfry floor, 3632 units up (original belfry floor 560 + 3072)
+	self.origin = ( -780 -1000 3650 )
+	self iprint "You spawned in the bell tower."
+end
+
+//-----------------------------------------------------------------------------
+// Stock guns stop bullets after ~4000 units, but the belfry is ~3650 up, so
+// shots from the tower never reached the ground. Raise every carried weapon's
+// range (also weapons picked up later) - only on this map.
+tower_bulletrange:
+	while (1)
+	{
+		for (local.i = 1; local.i <= $player.size; local.i++)
+		{
+			local.p = $player[local.i]
+			if (local.p != NULL && local.p.health > 0)
+			{
+				local.inv = local.p.inventory
+				for (local.j = 1; local.j <= local.inv.size; local.j++)
+				{
+					local.w = local.inv[local.j]
+					if (local.w != NULL && local.w.classname == "Weapon" && local.w.wk_range != 1)
+					{
+						local.w dmbulletrange 15000
+						local.w.wk_range = 1
+						dprintln ("tower: bullet range 15000 for " + local.w.model)
+					}
+				}
+			}
+		}
+		wait 1
+	}
+end
+
+//-----------------------------------------------------------------------------
+// Darken the whole map while the tower player is inside the tower
+tower_darkness:
+	level.tower_dark = 0
+	while (1)
+	{
+		local.inside = 0
+		for (local.i = 1; local.i <= $player.size; local.i++)
+		{
+			local.p = $player[local.i]
+			if (local.p != NULL && local.p.health > 0)
+			{
+				if ((waitthread is_tower_player local.p) == 1)
+				{
+					local.o = local.p.origin
+					if (local.o[0] > -860 && local.o[0] < -530 && local.o[1] > -1090 && local.o[1] < -770 && local.o[2] > 30)
+						local.inside = 1
+				}
+			}
+		}
+
+		if (local.inside == 1 && level.tower_dark == 0)
+		{
+			level.tower_dark = 1
+			// dark fog that still reaches the ground 3600 units below the belfry
+			// (no skyalpha change: a see-through sky shows up as white)
+			$world farplane_cull 0
+			$world farplane_color ( 0.02 0.02 0.035 )
+			$world farplaneclipcolor ( 0 0 0 )
+			$world farplane 6000
+			iprintlnbold "Darkness falls over the village..."
+		}
+		else if (local.inside == 0 && level.tower_dark == 1)
+		{
+			level.tower_dark = 0
+			$world farplane_color ( 0.333 0.333 0.329 )
+			$world farplane 9000
+			iprintlnbold "The light returns."
+		}
+		wait 0.25
+	}
+end
+
+//-----------------------------------------------------------------------------
+
+roundbasedthread:
+
+	// Can specify different scoreboard messages for round based games here.
+
+	level waitTill prespawn
+
+	level waittill spawn
+
+	// set the parameters for this round based match
+	level.dmrespawning = 0 // 1 or 0
+	level.dmroundlimit = 5 // round time limit in minutes
+	level.clockside = kills // set to axis, allies, kills, or draw
+
+	level waittill roundstart
+
+end

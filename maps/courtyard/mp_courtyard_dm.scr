@@ -1,0 +1,40 @@
+// COURTYARD - generated test map
+main:
+
+setcvar "g_obj_alliedtext1" "Courtyard"
+setcvar "g_obj_alliedtext2" ""
+setcvar "g_obj_alliedtext3" ""
+setcvar "g_obj_axistext1" ""
+setcvar "g_obj_axistext2" ""
+setcvar "g_obj_axistext3" ""
+
+setcvar "g_scoreboardpic" "none"
+
+	if(level.roundbased)
+		thread roundbasedthread
+
+	level waittill prespawn
+
+	exec global/DMprecache.scr
+	level.script = maps/dm/mp_courtyard_dm.scr
+	exec global/ambient.scr mohdm1
+
+	level waittill spawn
+
+end
+
+//-----------------------------------------------------------------------------
+
+roundbasedthread:
+
+	level waittill prespawn
+
+	level waittill spawn
+
+	level.dmrespawning = 0
+	level.dmroundlimit = 5
+	level.clockside = kills
+
+	level waittill roundstart
+
+end

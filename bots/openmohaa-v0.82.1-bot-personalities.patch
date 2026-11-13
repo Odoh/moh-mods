@@ -1,0 +1,630 @@
+diff --git a/code/fgame/g_bot.cpp b/code/fgame/g_bot.cpp
+index a6f8a3f..7d5b4c0 100644
+--- a/code/fgame/g_bot.cpp
++++ b/code/fgame/g_bot.cpp
+@@ -448,6 +448,8 @@ void G_AddBot(const saved_bot_t *saved)
+ 
+     if (gi.Argc() > 2) {
+         Q_strncpyz(botName, gi.Argv(2), sizeof(botName));
++    } else if (BotPersonalities::RosterName(botId - 1)) {
++        Q_strncpyz(botName, BotPersonalities::RosterName(botId - 1), sizeof(botName));
+     } else {
+         Com_sprintf(botName, sizeof(botName), "bot%d", botId);
+     }
+diff --git a/code/fgame/playerbot.cpp b/code/fgame/playerbot.cpp
+index 8c5198a..c7fdbd7 100644
+--- a/code/fgame/playerbot.cpp
++++ b/code/fgame/playerbot.cpp
+@@ -79,6 +79,7 @@ BotController::BotController()
+     m_iNextTauntTime = 0;
+ 
+     m_StateFlags = 0;
++    m_bHoldGround = false;
+     m_RunLabel.TrySetScript("global/bot_run.scr");
+ }
+ 
+@@ -409,7 +410,7 @@ void BotController::NoticeEvent(Vector vPos, int iType, Entity *pEnt, float fDis
+ 
+     fRangeFactor = 1.0 - (fDistanceSquared / fRadiusSquared);
+ 
+-    if (fRangeFactor < random()) {
++    if (fRangeFactor * m_personality.curiosity < random()) {
+         return;
+     }
+ 
+@@ -689,6 +690,7 @@ Attack the enemy
+ void BotController::InitState_Attack(botfunc_t *func)
+ {
+     func->CheckCondition = &BotController::CheckCondition_Attack;
++    func->BeginState     = &BotController::State_BeginAttack;
+     func->EndState       = &BotController::State_EndAttack;
+     func->ThinkState     = &BotController::State_Attack;
+ }
+@@ -801,6 +803,12 @@ bool BotController::CheckCondition_Attack(void)
+     return true;
+ }
+ 
++void BotController::State_BeginAttack(void)
++{
++    // Decide once per engagement whether to charge or hold position
++    m_bHoldGround = random() > m_personality.aggression;
++}
++
+ void BotController::State_EndAttack(void)
+ {
+     m_botCmd.buttons &= ~(BUTTON_ATTACKLEFT | BUTTON_ATTACKRIGHT);
+@@ -839,7 +847,7 @@ void BotController::State_Attack(void)
+         bCanAttack = true;
+         if (m_iLastUnseenTime) {
+             const float reactionTime = Q_min(1000 * Q_min(1, fDistanceSquared / Square(2048)), 1000);
+-            if (level.inttime <= m_iLastUnseenTime + 200 + G_Random(reactionTime)) {
++            if (level.inttime <= m_iLastUnseenTime + m_personality.reactMin + G_Random(reactionTime * m_personality.reactMult)) {
+                 bCanAttack = false;
+             } else {
+                 m_iLastUnseenTime = 0;
+@@ -854,8 +862,8 @@ void BotController::State_Attack(void)
+             float     fSecondaryBulletRangeSquared = fSecondaryBulletRange * fSecondaryBulletRange;
+             float     fSpreadFactor                = pWeap->GetSpreadFactor(FIRE_PRIMARY);
+ 
+-            const int maxContinousFireTime = fireDelay + 500 + G_Random(1500);
+-            const int maxBurstTime         = fireDelay + 100 + G_Random(500);
++            const int maxContinousFireTime = fireDelay + m_personality.fireMin + G_Random(m_personality.fireRand);
++            const int maxBurstTime         = fireDelay + m_personality.burstMin + G_Random(m_personality.burstRand);
+ 
+             //
+             // check the fire movement speed if the weapon has a max fire movement
+@@ -1009,7 +1017,7 @@ void BotController::State_Attack(void)
+             m_iLastAimTime = level.inttime;
+         }
+ 
+-        rotation.AimAt(vTarget + m_vAimOffset);
++        rotation.AimAt(vTarget + m_vAimOffset * m_personality.spread);
+     } else {
+         AimAtAimNode();
+     }
+@@ -1018,6 +1026,14 @@ void BotController::State_Attack(void)
+         return;
+     }
+ 
++    if (m_bHoldGround) {
++        // Cautious personalities stay put and let enemies come to them
++        if (!bCanSee && level.inttime > m_iLastSeenTime + 1500) {
++            ClearEnemy();
++        }
++        return;
++    }
++
+     fEnemyDistanceSquared = (controlledEnt->origin - m_vLastEnemyPos).lengthSquared();
+ 
+     if ((!movement.MoveToBestAttractivePoint(5) && !movement.IsMoving())
+@@ -1237,8 +1253,12 @@ void BotController::Killed(const Event& ev)
+ 
+     attacker = ev.GetEntity(1);
+ 
+-    if (attacker && rand() % 5 == 0) {
+-        // 1/5 chance to go back to the attacker position
++    if (m_personality.deathLines.size() && random() < m_personality.deathChance) {
++        Say(m_personality.deathLines[rand() % m_personality.deathLines.size()]);
++    }
++
++    if (attacker && random() < m_personality.revenge) {
++        // personality-based chance to go back to the attacker position
+         m_vLastDeathPos = attacker->origin;
+     } else {
+         m_vLastDeathPos = vec_zero;
+@@ -1246,7 +1266,7 @@ void BotController::Killed(const Event& ev)
+ 
+     // Choose a new random primary weapon
+     Event event(EV_Player_PrimaryDMWeapon);
+-    event.AddString("auto");
++    event.AddString(m_personality.weapon.c_str());
+ 
+     controlledEnt->ProcessEvent(event);
+ 
+@@ -1265,7 +1285,13 @@ void BotController::GotKill(const Event& ev)
+     ClearEnemy();
+     m_iCuriousTime = 0;
+ 
+-    if (level.inttime >= m_iNextTauntTime && (rand() % 5) == 0) {
++    if (level.inttime >= m_iNextTauntTime && random() < m_personality.tauntChance) {
++        if (m_personality.killLines.size() && rand() % 3) {
++            Say(m_personality.killLines[rand() % m_personality.killLines.size()]);
++            m_iNextTauntTime = level.inttime + 5000;
++            return;
++        }
++
+         //
+         // Randomly play a taunt
+         //
+@@ -1296,6 +1322,20 @@ void BotController::setControlledEntity(Player *player)
+     movement.SetControlledEntity(player);
+     rotation.SetControlledEntity(player);
+ 
++    m_personality = BotPersonalities::Get(player->client ? player->client->pers.netname : NULL);
++    rotation.SetTurnFactor(m_personality.turn);
++    gi.Printf(
++        "Bot %s: personality '%s' (weapon %s)\n",
++        player->client ? player->client->pers.netname : "?",
++        m_personality.style.c_str(),
++        m_personality.weapon.c_str()
++    );
++    {
++        Event weapEv(EV_Player_PrimaryDMWeapon);
++        weapEv.AddString(m_personality.weapon.c_str());
++        player->ProcessEvent(weapEv);
++    }
++
+     delegateHandle_gotKill =
+         player->delegate_gotKill.Add(std::bind(&BotController::GotKill, this, std::placeholders::_1));
+     delegateHandle_killed = player->delegate_killed.Add(std::bind(&BotController::Killed, this, std::placeholders::_1));
+@@ -1304,6 +1344,14 @@ void BotController::setControlledEntity(Player *player)
+     delegateHandle_spawned = player->delegate_spawned.Add(std::bind(&BotController::Spawned, this));
+ }
+ 
++void BotController::Say(const std::string& line)
++{
++    Event event("dmmessage");
++    event.AddInteger(0);
++    event.AddString(line.c_str());
++    controlledEnt->ProcessEvent(event);
++}
++
+ Player *BotController::getControlledEntity() const
+ {
+     return controlledEnt;
+diff --git a/code/fgame/playerbot.h b/code/fgame/playerbot.h
+index 9e27da7..c27a49f 100644
+--- a/code/fgame/playerbot.h
++++ b/code/fgame/playerbot.h
+@@ -23,6 +23,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ 
+ #pragma once
+ 
++#include "playerbot_personality.h"
+ #include "player.h"
+ #include "navigate.h"
+ #include "navigation_path.h"
+@@ -124,6 +125,7 @@ class BotRotation
+ {
+ public:
+     BotRotation();
++    void SetTurnFactor(float factor);
+ 
+     void SetControlledEntity(Player *newEntity);
+ 
+@@ -139,6 +141,7 @@ private:
+     Vector m_vCurrentAng;
+     Vector m_vAngDelta;
+     Vector m_vAngSpeed;
++    float  m_fTurnFactor;
+ };
+ 
+ class BotState
+@@ -196,6 +199,11 @@ private:
+ 
+     // Taunts
+     int m_iNextTauntTime;
++
++    // Personality (added)
++    BotPersonality m_personality;
++    bool           m_bHoldGround;
++    void           Say(const std::string& line);
+     int m_iLastFireTime;
+ 
+ private:
+diff --git a/code/fgame/playerbot_master.cpp b/code/fgame/playerbot_master.cpp
+index d4cdcd4..909ecd5 100644
+--- a/code/fgame/playerbot_master.cpp
++++ b/code/fgame/playerbot_master.cpp
+@@ -43,6 +43,7 @@ CLASS_DECLARATION(Listener, BotManager, NULL) {
+ 
+ void BotManager::Init()
+ {
++    BotPersonalities::Load();
+     botControllerManager.Init();
+ }
+ 
+diff --git a/code/fgame/playerbot_personality.cpp b/code/fgame/playerbot_personality.cpp
+new file mode 100644
+index 0000000..3b202cb
+--- /dev/null
++++ b/code/fgame/playerbot_personality.cpp
+@@ -0,0 +1,304 @@
++/*
++===========================================================================
++Copyright (C) 2026 the OpenMoHAA team
++
++This file is part of OpenMoHAA source code.
++
++OpenMoHAA source code is free software; you can redistribute it
++and/or modify it under the terms of the GNU General Public License as
++published by the Free Software Foundation; either version 2 of the License,
++or (at your option) any later version.
++===========================================================================
++*/
++
++// playerbot_personality.cpp: per-bot personality profiles
++
++#include "g_local.h"
++#include "playerbot_personality.h"
++
++#include <cstdlib>
++#include <cctype>
++
++static std::vector<BotPersonality> s_profiles;
++static BotPersonality              s_default;
++static bool                        s_loaded = false;
++
++static const char *s_builtin =
++    "[Hans]\n"
++    "style = Sniper\n"
++    "weapon = sniper\n"
++    "spread = 0.45\n"
++    "react_min = 350\n"
++    "react_mult = 1.2\n"
++    "turn = 0.8\n"
++    "aggression = 0.15\n"
++    "curiosity = 0.5\n"
++    "revenge = 0.05\n"
++    "taunt_chance = 0.3\n"
++    "kill_line = One shot.\n"
++    "kill_line = Patience wins.\n"
++    "death_line = Lucky shot...\n"
++    "\n"
++    "[Bucky]\n"
++    "style = Rusher\n"
++    "weapon = smg\n"
++    "spread = 1.4\n"
++    "react_min = 120\n"
++    "react_mult = 0.6\n"
++    "turn = 1.5\n"
++    "aggression = 0.95\n"
++    "curiosity = 1.8\n"
++    "revenge = 0.6\n"
++    "fire_min = 900\n"
++    "fire_rand = 2000\n"
++    "burst_min = 60\n"
++    "burst_rand = 200\n"
++    "taunt_chance = 0.4\n"
++    "kill_line = Too slow!\n"
++    "kill_line = Keep up!\n"
++    "death_line = I'm coming back for you!\n"
++    "\n"
++    "[Walt]\n"
++    "style = Cautious rifleman\n"
++    "weapon = rifle\n"
++    "spread = 0.8\n"
++    "react_min = 250\n"
++    "aggression = 0.3\n"
++    "curiosity = 0.8\n"
++    "revenge = 0.1\n"
++    "taunt_chance = 0.1\n"
++    "kill_line = Target down.\n"
++    "\n"
++    "[Otto]\n"
++    "style = Machine gunner\n"
++    "weapon = mg\n"
++    "spread = 1.2\n"
++    "aggression = 0.6\n"
++    "fire_min = 1500\n"
++    "fire_rand = 2500\n"
++    "burst_min = 50\n"
++    "burst_rand = 150\n"
++    "taunt_chance = 0.2\n"
++    "kill_line = Suppressed.\n"
++    "\n"
++    "[Mack]\n"
++    "style = Trash-talker\n"
++    "weapon = shotgun\n"
++    "aggression = 0.8\n"
++    "curiosity = 1.4\n"
++    "revenge = 0.4\n"
++    "taunt_chance = 0.9\n"
++    "death_chance = 0.6\n"
++    "kill_line = Sit down!\n"
++    "kill_line = Is that all you got?\n"
++    "kill_line = Call your mother, she misses you.\n"
++    "kill_line = Next!\n"
++    "death_line = That doesn't count!\n"
++    "death_line = Lag! Total lag!\n"
++    "\n"
++    "[Klaus]\n"
++    "style = Veteran\n"
++    "weapon = auto\n"
++    "spread = 0.6\n"
++    "react_min = 150\n"
++    "react_mult = 0.7\n"
++    "turn = 1.3\n"
++    "aggression = 0.55\n"
++    "revenge = 0.3\n"
++    "taunt_chance = 0.15\n"
++    "kill_line = Stay low, rookie.\n"
++    "\n"
++    "[Pip]\n"
++    "style = Rookie\n"
++    "weapon = auto\n"
++    "spread = 2.0\n"
++    "react_min = 500\n"
++    "react_mult = 1.8\n"
++    "turn = 0.6\n"
++    "aggression = 0.4\n"
++    "curiosity = 1.2\n"
++    "taunt_chance = 0.5\n"
++    "death_chance = 0.5\n"
++    "kill_line = Did I get him? I got him!\n"
++    "death_line = Medic!\n"
++    "death_line = Nobody told me they shoot back!\n"
++    "\n"
++    "[Fritz]\n"
++    "style = Bazooka\n"
++    "weapon = heavy\n"
++    "spread = 0.9\n"
++    "aggression = 0.5\n"
++    "taunt_chance = 0.3\n"
++    "kill_line = Boom.\n";
++
++static std::string Trim(const std::string& s)
++{
++    size_t a = 0, b = s.size();
++    while (a < b && isspace((unsigned char)s[a])) {
++        a++;
++    }
++    while (b > a && isspace((unsigned char)s[b - 1])) {
++        b--;
++    }
++    return s.substr(a, b - a);
++}
++
++static void SetKey(BotPersonality& p, const std::string& key, const std::string& val)
++{
++    float f = (float)atof(val.c_str());
++
++    if (!Q_stricmp(key.c_str(), "style")) {
++        p.style = val;
++    } else if (!Q_stricmp(key.c_str(), "weapon")) {
++        p.weapon = val;
++    } else if (!Q_stricmp(key.c_str(), "spread")) {
++        p.spread = f;
++    } else if (!Q_stricmp(key.c_str(), "react_min")) {
++        p.reactMin = f;
++    } else if (!Q_stricmp(key.c_str(), "react_mult")) {
++        p.reactMult = f;
++    } else if (!Q_stricmp(key.c_str(), "turn")) {
++        p.turn = f;
++    } else if (!Q_stricmp(key.c_str(), "aggression")) {
++        p.aggression = f;
++    } else if (!Q_stricmp(key.c_str(), "curiosity")) {
++        p.curiosity = f;
++    } else if (!Q_stricmp(key.c_str(), "revenge")) {
++        p.revenge = f;
++    } else if (!Q_stricmp(key.c_str(), "fire_min")) {
++        p.fireMin = f;
++    } else if (!Q_stricmp(key.c_str(), "fire_rand")) {
++        p.fireRand = f;
++    } else if (!Q_stricmp(key.c_str(), "burst_min")) {
++        p.burstMin = f;
++    } else if (!Q_stricmp(key.c_str(), "burst_rand")) {
++        p.burstRand = f;
++    } else if (!Q_stricmp(key.c_str(), "taunt_chance")) {
++        p.tauntChance = f;
++    } else if (!Q_stricmp(key.c_str(), "death_chance")) {
++        p.deathChance = f;
++    } else if (!Q_stricmp(key.c_str(), "kill_line")) {
++        p.killLines.push_back(val);
++    } else if (!Q_stricmp(key.c_str(), "death_line")) {
++        p.deathLines.push_back(val);
++    } else {
++        gi.Printf("bot_personalities: unknown key '%s' for %s\n", key.c_str(), p.name.c_str());
++    }
++}
++
++static void Parse(const char *text)
++{
++    std::string     all(text);
++    size_t          pos     = 0;
++    BotPersonality *current = NULL;
++
++    s_profiles.clear();
++
++    while (pos < all.size()) {
++        size_t      eol  = all.find('\n', pos);
++        std::string line = Trim(all.substr(pos, eol == std::string::npos ? std::string::npos : eol - pos));
++        pos              = (eol == std::string::npos) ? all.size() : eol + 1;
++
++        if (line.empty() || line[0] == '#' || line.compare(0, 2, "//") == 0) {
++            continue;
++        }
++
++        if (line[0] == '[') {
++            size_t close = line.find(']');
++            s_profiles.push_back(BotPersonality());
++            current       = &s_profiles.back();
++            current->name = Trim(line.substr(1, close == std::string::npos ? std::string::npos : close - 1));
++            continue;
++        }
++
++        size_t eq = line.find('=');
++        if (eq == std::string::npos || !current) {
++            continue;
++        }
++
++        SetKey(*current, Trim(line.substr(0, eq)), Trim(line.substr(eq + 1)));
++    }
++}
++
++void BotPersonalities::Load()
++{
++    void *buffer = NULL;
++    long  len    = gi.FS_ReadFile("bot_personalities.cfg", &buffer, qtrue);
++
++    if (len > 0 && buffer) {
++        std::string text((const char *)buffer, len);
++        gi.FS_FreeFile(buffer);
++        Parse(text.c_str());
++        gi.Printf("Loaded %d bot personalities from bot_personalities.cfg\n", (int)s_profiles.size());
++    } else {
++        Parse(s_builtin);
++        gi.Printf("Using %d built-in bot personalities (no bot_personalities.cfg)\n", (int)s_profiles.size());
++    }
++
++    for (size_t i = 0; i < s_profiles.size(); i++) {
++        gi.Printf(
++            "  %s (%s): weapon=%s spread=%.2f aggression=%.2f\n",
++            s_profiles[i].name.c_str(),
++            s_profiles[i].style.c_str(),
++            s_profiles[i].weapon.c_str(),
++            s_profiles[i].spread,
++            s_profiles[i].aggression
++        );
++    }
++
++    s_loaded = true;
++}
++
++const BotPersonality& BotPersonalities::Get(const char *name)
++{
++    if (!s_loaded) {
++        Load();
++    }
++
++    if (!name) {
++        return s_default;
++    }
++
++    for (size_t i = 0; i < s_profiles.size(); i++) {
++        if (!Q_stricmp(s_profiles[i].name.c_str(), name)) {
++            return s_profiles[i];
++        }
++    }
++
++    // "Hans2" -> "Hans" (extra copies of a profile get a number suffix)
++    std::string base(name);
++    while (!base.empty() && isdigit((unsigned char)base.back())) {
++        base.pop_back();
++    }
++    for (size_t i = 0; i < s_profiles.size(); i++) {
++        if (!Q_stricmp(s_profiles[i].name.c_str(), base.c_str())) {
++            return s_profiles[i];
++        }
++    }
++
++    return s_default;
++}
++
++const char *BotPersonalities::RosterName(int index)
++{
++    static char buf[64];
++
++    if (!s_loaded) {
++        Load();
++    }
++
++    if (s_profiles.empty() || index < 0) {
++        return NULL;
++    }
++
++    int n     = (int)s_profiles.size();
++    int round = index / n;
++
++    if (round == 0) {
++        Q_strncpyz(buf, s_profiles[index % n].name.c_str(), sizeof(buf));
++    } else {
++        Com_sprintf(buf, sizeof(buf), "%s%d", s_profiles[index % n].name.c_str(), round + 1);
++    }
++
++    return buf;
++}
+diff --git a/code/fgame/playerbot_personality.h b/code/fgame/playerbot_personality.h
+new file mode 100644
+index 0000000..74b1b50
+--- /dev/null
++++ b/code/fgame/playerbot_personality.h
+@@ -0,0 +1,60 @@
++/*
++===========================================================================
++Copyright (C) 2026 the OpenMoHAA team
++
++This file is part of OpenMoHAA source code.
++
++OpenMoHAA source code is free software; you can redistribute it
++and/or modify it under the terms of the GNU General Public License as
++published by the Free Software Foundation; either version 2 of the License,
++or (at your option) any later version.
++===========================================================================
++*/
++
++// playerbot_personality.h: per-bot personality profiles
++//
++// Profiles are read from "bot_personalities.cfg" (searched like any game
++// file: maintt/, mainta/, main/ or inside a pk3). Each [Name] section defines
++// one bot. Bots are named after the profiles in file order when they are
++// added without an explicit name. A built-in roster is used when the file is
++// missing.
++
++#pragma once
++
++#include <string>
++#include <vector>
++
++struct BotPersonality {
++    std::string name  = "bot";
++    std::string style = "Default";
++
++    // primary weapon class: auto, rifle, smg, mg, sniper, shotgun, heavy
++    std::string weapon = "auto";
++
++    float spread     = 1.0f; // aim error multiplier (lower = more accurate)
++    float reactMin   = 200;  // ms before shooting a newly seen enemy
++    float reactMult  = 1.0f; // multiplier for the distance-based random reaction delay
++    float turn       = 1.0f; // turn speed multiplier
++    float aggression = 0.5f; // 0 = holds position & lets enemies go, 1 = always charges
++    float curiosity  = 1.0f; // chance multiplier to investigate heard sounds
++    float revenge    = 0.2f; // chance to return to where it was killed
++    float fireMin    = 500;  // ms of continuous fire before pausing
++    float fireRand   = 1500; // random ms added to fireMin
++    float burstMin   = 100;  // ms pause between bursts
++    float burstRand  = 500;  // random ms added to burstMin
++    float tauntChance = 0.2f; // chance to say something after a kill
++    float deathChance = 0.1f; // chance to say something after dying
++
++    std::vector<std::string> killLines;
++    std::vector<std::string> deathLines;
++};
++
++namespace BotPersonalities
++{
++// (Re)load profiles from bot_personalities.cfg, or fall back to built-ins
++void Load();
++// Profile for a bot name (case-insensitive). Unknown names get the default profile.
++const BotPersonality& Get(const char *name);
++// Name to give the n-th added bot (0-based), or NULL when there are no profiles
++const char *RosterName(int index);
++} // namespace BotPersonalities
+diff --git a/code/fgame/playerbot_rotation.cpp b/code/fgame/playerbot_rotation.cpp
+index 2d731a1..7f6eee5 100644
+--- a/code/fgame/playerbot_rotation.cpp
++++ b/code/fgame/playerbot_rotation.cpp
+@@ -29,6 +29,12 @@ BotRotation::BotRotation()
+     m_vAngSpeed   = vec_zero;
+     m_vTargetAng  = vec_zero;
+     m_vCurrentAng = vec_zero;
++    m_fTurnFactor = 1.0f;
++}
++
++void BotRotation::SetTurnFactor(float factor)
++{
++    m_fTurnFactor = factor > 0.05f ? factor : 0.05f;
+ }
+ 
+ void BotRotation::SetControlledEntity(Player *newEntity)
+@@ -65,8 +71,8 @@ void BotRotation::TurnThink(usercmd_t& botcmd, usereyes_t& eyeinfo)
+     float speed;
+     int   i;
+ 
+-    factor      = 1.0;
+-    maxChange   = 360;
++    factor      = m_fTurnFactor;
++    maxChange   = 360 * m_fTurnFactor;
+     minChange   = 20;
+     changeSpeed = 15.0;
+ 
